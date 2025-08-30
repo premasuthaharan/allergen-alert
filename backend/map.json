@@ -1,0 +1,5 @@
+{
+    "nuts": ["peanut", "peanuts", "almond", "almonds"],
+    "dairy": ["milk", "cheese", "yogurt"],
+    "gluten": ["wheat", "barley", "rye"]
+}
