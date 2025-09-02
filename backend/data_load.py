@@ -1,37 +1,26 @@
-import pandas as pd
 import json
-import re
+from db import recipes_collection
 
-with open("map.json") as f:
-    MAP = json.load(f)
+def load_json(file_path):
+    with open(file_path, "r") as f:
+        data = json.load(f)
+    
+    docs = []
+    for recipe_id, recipe_data in data.items():
+        recipe_data["_id"] = recipe_id  # preserve original ID
+        # remove "ADVERTISEMENT"
+        recipe_data["ingredients"] = [
+            i.replace("ADVERTISEMENT", "").strip()
+            for i in recipe_data.get("ingredients", [])
+            if i.strip() != "ADVERTISEMENT"
+        ]
+        docs.append(recipe_data)
+    
+    if docs:
+        recipes_collection.insert_many(docs)
+        print(f"Inserted {len(docs)} recipes from {file_path}")
 
-RECIPES = pd.read_csv("sample_data.csv")
-
-def find_allergens(ingredients):
-    """Returns a set of all allergens found in ingredients list"""
-    found = set()
-    text = " ".join(ingredients).lower()
-    for allergen, keywords in MAP.items():
-        for k in keywords:
-            if re.search(rf"\b{k}\b", text):
-                found.add(allergen)
-                break
-    return found
-
-def allergen_stats(dish: str):
-    """Returns a dictionary with allergen frequency (as a percentage)"""
-    subset = RECIPES[RECIPES["dish"].str.contains(dish, case=False, na=False)]
-    if subset.empty:
-        return None
-
-    counts = {a: 0 for a in MAP.keys()}
-    total = len(subset)
-
-    for _, row in subset.iterrows():
-        allergens = find_allergens(row['ingredients'.split(",")])
-        for a in allergens:
-            counts[a] += 1
-
-    # counts to percentages
-    percentages = {a: round((c/total)*100, 1) for a, c in counts.items()}
-    return {"dish": dish, "total": total, "allergens": percentages}
+if __name__ == "__main__":
+    load_json("/Users/prema/Downloads/recipes_raw/recipes_raw_nosource_ar.json")
+    load_json("/Users/prema/Downloads/recipes_raw/recipes_raw_nosource_epi.json")
+    load_json("/Users/prema/Downloads/recipes_raw/recipes_raw_nosource_fn.json")
