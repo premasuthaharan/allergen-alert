@@ -1,4 +1,6 @@
 .env
+/frontend/.env
+/backend/.env
 
 __pycache__/
 *.pyc
@@ -11,6 +13,8 @@ venv/
 
 # dependencies
 node_modules/
+frontend/node_modules/
+backend/node_modules/
 
 # Expo
 .expo/
@@ -52,3 +56,6 @@ app-example
 android/
 ios/
 .env.*
+
+expo-env.d.ts
+# @end expo-cli
