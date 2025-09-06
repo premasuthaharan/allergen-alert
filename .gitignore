@@ -1,4 +1,6 @@
 .env
+frontend/.gitignore
+frontend/.env
 
 __pycache__/
 *.pyc
