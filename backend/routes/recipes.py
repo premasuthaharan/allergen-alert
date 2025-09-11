@@ -3,32 +3,6 @@ from fastapi import APIRouter, Query
 from db import recipes_collection, llm_cache
 from models import Recipe
 from typing import List
-from gemini_integration import analyze_dish_with_gemini
-
-def get_llm_cache_fuzzy(dish, main, threshold=80):
-    candidates = list(llm_cache.find({"main": main}))
-    best = None
-    best_score = 0
-    for c in candidates:
-        score = fuzz.ratio(dish.lower(), c["dish"].lower())
-        if score > best_score and score >= threshold:
-            best = c
-            best_score = score
-    return best
-
-def set_llm_cache(dish, main, analysis):
-    llm_cache.update_one(
-        {
-            "dish": dish,
-            "main": main
-        },
-        {
-            "$set": {
-                "analysis": analysis
-            }
-        },
-        upsert=True
-    )
 
 router = APIRouter()
 
@@ -169,35 +143,6 @@ def match(
     else:
         probability_with_any_allergen = 0.0
         probability_breakdown = {allergen: 0.0 for allergen in allergen_counts.keys()}
-    # Use Gemini for advanced analysis
-    llm_analysis = None
-    if 95 > percentage_any > 30 and 95 > probability_with_any_allergen > 30:
-        cache = get_llm_cache_fuzzy(dish, main_ingredients)
-        analysis = {}
-        matched = dish
-        if cache and "analysis" in cache:
-            llm_analysis = cache["analysis"]
-            matched = cache["dish"]
-        print(llm_analysis)
-        missing = [a for a in user_allergens if a not in llm_analysis["allergens"].keys()] if llm_analysis else user_allergens
-        if missing:
-            print(missing)
-            new_analysis = analyze_dish_with_gemini(
-                dish_name=matched,
-                ingredients=cache["ingredients"] if cache and "ingredients" in cache else main_ingredients,
-                allergens=missing,
-                current_conclusion={
-                    "probability_with_any_allergen": probability_with_any_allergen,
-                    "probability_breakdown": probability_breakdown
-                }
-            )
-        else:
-            new_analysis = None
-        if new_analysis:
-            analysis.update(new_analysis)
-            set_llm_cache(matched, main_ingredients, analysis)
-    if analysis:
-        llm_analysis = analysis
     response = {
         "dish": dish,
         "main_ingredients": main_ingredients,
@@ -219,7 +164,4 @@ def match(
             for combined_score, title_score, ing_score, r in scored
         ]
     }
-    if llm_analysis:
-        response["llm_analysis"] = llm_analysis
-
     return response
