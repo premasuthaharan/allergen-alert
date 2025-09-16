@@ -1,8 +1,9 @@
 from rapidfuzz import fuzz
 from fastapi import APIRouter, Query
-from db import recipes_collection, llm_cache
+from db import recipes_collection
 from models import Recipe
 from typing import List
+from collections import Counter
 
 router = APIRouter()
 
@@ -165,3 +166,69 @@ def match(
         ]
     }
     return response
+
+@router.get("/ingredient_analysis")
+def ingredient_analysis(
+    dish: str = Query(..., description="Dish name to check"),
+    user_allergens: List[str] = Query([]),
+    main_ingredients: List[str] = Query([])
+):
+    # Use MongoDB regex query to match whole words in the title
+    # Fuzzy match the dish in the database (threshold 50%)
+    all_dishes = list(recipes_collection.find({}, {"title": 1, "ingredients": 1, "ingredient_analysis": 1, "normalized_ingredients": 1}))
+    threshold = 50
+    matched_dishes = []
+    for d in all_dishes:
+        title = d.get("title", "")
+        if not isinstance(title, str) or not title.strip():
+            continue
+        score = fuzz.ratio(dish.lower(), title.lower())
+        if score >= threshold:
+            matched_dishes.append(d)
+
+    total = len(matched_dishes)
+    with_any_allergen = 0
+    allergen_counts = {a.lower(): 0 for a in user_allergens}
+    usage_dict = {a.lower(): [] for a in user_allergens}
+    matched_titles = []
+    for d in matched_dishes:
+        matched_titles.append(d.get("title", ""))
+        analysis = d.get("ingredient_analysis", {})
+        found_any = False
+        for allergen in user_allergens:
+            for ing, details in analysis.items():
+                if allergen.lower() in ing.lower() and "usage" in details:
+                    usage_dict[allergen.lower()].append(details["usage"])
+                    allergen_counts[allergen.lower()] += 1
+                    found_any = True
+        if found_any:
+            with_any_allergen += 1
+    percentage_with_any = (with_any_allergen / total * 100) if total else 0.0
+    probability_breakdown = {
+        allergen: round((count / total * 100), 2) if total else 0.0
+        for allergen, count in allergen_counts.items()
+    }
+    # Find most common usage for each allergen, breaking ties by most extreme: central > garnish > trace
+    usage_priority = {"central": 0, "garnish": 1, "trace": 2}
+    def pick_most_extreme_with_count(usages):
+        if not usages:
+            return {"usage": None, "count": 0}
+        count = Counter(usages)
+        max_count = max(count.values())
+        tied = [u for u, c in count.items() if c == max_count]
+        tied_sorted = sorted(tied, key=lambda u: usage_priority.get(u, 99))
+        usage = tied_sorted[0]
+        return {"usage": usage, "count": count[usage]}
+    common_usage = {
+        allergen: pick_most_extreme_with_count(usages)
+        for allergen, usages in usage_dict.items()
+    }
+    return {
+        "dish": dish,
+        "main_ingredients": main_ingredients,
+        "total_recipes": total,
+        "probability_with_any": round(percentage_with_any, 2),
+        "probability_breakdown": probability_breakdown,
+        "matched": matched_titles,
+        "common_usage": common_usage
+    }
