@@ -1,14 +1,19 @@
 import React from 'react';
 import { TouchableOpacity, Text, StyleSheet } from 'react-native';
+import { Colors } from '../constants/Colors';
+import { ALLERGEN_CATEGORIES } from '../constants/allergenCategories';
 
-export default function Bubble({ label, selected, onPress }) {
+
+export default function AllergenBubble({ label, selected, onPress }) {
+  const mainLabels = ALLERGEN_CATEGORIES.map(cat => cat.label);
+  const isMain = mainLabels.includes(label);
   return (
     <TouchableOpacity
-      style={[styles.bubble, selected ? styles.selected : styles.unselected]}
+      style={[styles.bubble, selected ? styles.selected : styles.unselected, isMain ? { backgroundColor: Colors.light.buttonBg } : null]}
       onPress={onPress}
       activeOpacity={0.7}
     >
-      <Text style={[styles.bubbleText, selected ? styles.selectedText : styles.unselectedText]}>{label}</Text>
+      <Text style={[styles.bubbleText, selected ? styles.selectedText : styles.unselectedText, isMain ? { color: Colors.light.buttonText } : null]}>{label}</Text>
     </TouchableOpacity>
   );
 }
@@ -27,12 +32,12 @@ const styles = StyleSheet.create({
     borderColor: '#A89F91',
   },
   selected: {
-    backgroundColor: '#8D6742',
-    borderColor: '#6B4F2A',
+    backgroundColor: '#6d3c7d',
+    borderColor: '#d4badf',
   },
   unselected: {
-    backgroundColor: '#EFE9E1',
-    borderColor: '#A89F91',
+    backgroundColor: '#d4badf',
+    borderColor: '#917db2',
   },
   bubbleText: {
     fontSize: 18,
@@ -40,10 +45,10 @@ const styles = StyleSheet.create({
     color: '#6B4F2A',
   },
   selectedText: {
-    color: '#fff',
+    color: '#d4badf',
     fontWeight: 'bold',
   },
   unselectedText: {
-    color: '#6B4F2A',
+    color: '#8e659d',
   },
 });
