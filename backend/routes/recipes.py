@@ -7,7 +7,7 @@ from collections import Counter
 
 router = APIRouter()
 
-COMMON_ALLERGENS = ["peanuts", "tree nuts", "milk", "egg", "wheat", "soy", "fish", "shellfish"]
+NORMAL = {'tomatoes': ['marinara', 'tomato', 'tomato sauce', 'tomato paste', 'ketchup']}
 
 @router.get("/search", response_model=List[Recipe])
 def search(dish: str = Query(..., description="Dish name to search for"), user_allergens: List[str] = Query([])):
@@ -173,18 +173,55 @@ def ingredient_analysis(
     user_allergens: List[str] = Query([]),
     main_ingredients: List[str] = Query([])
 ):
-    # Use MongoDB regex query to match whole words in the title
-    # Fuzzy match the dish in the database (threshold 50%)
-    all_dishes = list(recipes_collection.find({}, {"title": 1, "ingredients": 1, "ingredient_analysis": 1, "normalized_ingredients": 1}))
-    threshold = 50
+    import time
+    start_time = time.time()
+    
+    # Instead of loading ALL dishes, use MongoDB's text search and regex for better performance
+    # First try exact and partial matches
+    search_patterns = [
+        {"title": {"$regex": f"\\b{dish}\\b", "$options": "i"}},  # Word boundary match
+        {"title": {"$regex": dish, "$options": "i"}},  # General match
+    ]
+    
     matched_dishes = []
-    for d in all_dishes:
-        title = d.get("title", "")
-        if not isinstance(title, str) or not title.strip():
-            continue
-        score = fuzz.ratio(dish.lower(), title.lower())
-        if score >= threshold:
-            matched_dishes.append(d)
+    threshold = 70
+    
+    # Try each search pattern until we get enough results or exhaust options
+    for pattern in search_patterns:
+        if len(matched_dishes) < 50:  # Limit to reasonable number for performance
+            cursor = recipes_collection.find(
+                pattern, 
+                {"title": 1, "ingredients": 1, "ingredient_analysis": 1, "normalized_ingredients": 1}
+            ).limit(100)  # Limit database results
+            
+            for d in cursor:
+                title = d.get("title", "")
+                if not isinstance(title, str) or not title.strip():
+                    continue
+                score = fuzz.ratio(dish.lower(), title.lower())
+                if score >= threshold:
+                    matched_dishes.append(d)
+            
+            if len(matched_dishes) >= 20:  # Stop if we have enough good matches
+                break
+    
+    # If still no good matches, lower the threshold and try broader search
+    if len(matched_dishes) < 5:
+        threshold = 50
+        cursor = recipes_collection.find(
+            {"title": {"$regex": dish, "$options": "i"}}, 
+            {"title": 1, "ingredients": 1, "ingredient_analysis": 1, "normalized_ingredients": 1}
+        ).limit(200)
+        
+        for d in cursor:
+            title = d.get("title", "")
+            if not isinstance(title, str) or not title.strip():
+                continue
+            score = fuzz.ratio(dish.lower(), title.lower())
+            if score >= threshold:
+                matched_dishes.append(d)
+
+    print(f"Database query took {time.time() - start_time:.3f}s, found {len(matched_dishes)} matches for '{dish}'")
 
     total = len(matched_dishes)
     with_any_allergen = 0
@@ -194,22 +231,61 @@ def ingredient_analysis(
     for d in matched_dishes:
         matched_titles.append(d.get("title", ""))
         analysis = d.get("ingredient_analysis", {})
+        normalized_ings = d.get("normalized_ingredients", [])
+        ingredients = d.get("ingredients", [])
         found_any = False
         for allergen in user_allergens:
-            for ing, details in analysis.items():
-                if allergen.lower() in ing.lower() and "usage" in details:
-                    usage_dict[allergen.lower()].append(details["usage"])
-                    allergen_counts[allergen.lower()] += 1
-                    found_any = True
+            # Try to find matching normalized ingredient and use that for analysis
+            match_idx = None
+            match_str = None
+            # Search for allergen in normalized_ingredients
+            for idx, norm_ing in enumerate(normalized_ings):
+                if allergen.lower() == norm_ing.lower():
+                    match_idx = idx
+                    match_str = norm_ing
+                    break
+            # If not found, try preceding element
+            if match_idx is None:
+                for idx, norm_ing in enumerate(normalized_ings):
+                    if idx > 0 and allergen.lower() == normalized_ings[idx-1].lower():
+                        match_idx = idx-1
+                        match_str = normalized_ings[idx-1]
+                        break
+            # If still not found, try element above that
+            if match_idx is None:
+                for idx, norm_ing in enumerate(normalized_ings):
+                    if idx > 1 and allergen.lower() == normalized_ings[idx-2].lower():
+                        match_idx = idx-2
+                        match_str = normalized_ings[idx-2]
+                        break
+            # Now, try to find an ingredient string containing the matching normalized ingredient
+            found_usage = None
+            if match_str is not None:
+                for ing in ingredients:
+                    if match_str.lower() in ing.lower():
+                        # Use this ingredient for analysis
+                        details = analysis.get(ing, {})
+                        if "usage" in details:
+                            usage_dict[allergen.lower()].append(details["usage"])
+                            allergen_counts[allergen.lower()] += 1
+                            found_usage = details["usage"]
+                            found_any = True
+                        break
+            # If no match found, put null for common_usage
+            if not found_usage:
+                usage_dict[allergen.lower()].append(None)
         if found_any:
             with_any_allergen += 1
     percentage_with_any = (with_any_allergen / total * 100) if total else 0.0
-    probability_breakdown = {
-        allergen: round((count / total * 100), 2) if total else 0.0
-        for allergen, count in allergen_counts.items()
-    }
+    probability_breakdown = {}
+    for allergen, count in allergen_counts.items():
+        # If allergen is in main_ingredients, set probability to 100%
+        if any(allergen.lower() == ing.lower() for ing in main_ingredients):
+            probability_breakdown[allergen] = 100.0
+        else:
+            probability_breakdown[allergen] = round((count / total * 100), 2) if total else 0.0
     # Find most common usage for each allergen, breaking ties by most extreme: central > garnish > trace
-    usage_priority = {"central": 0, "garnish": 1, "trace": 2}
+    usage_priority = {"central": 0, "garnish": 1, "trace": 2, None: 3}
     def pick_most_extreme_with_count(usages):
         if not usages:
             return {"usage": None, "count": 0}
@@ -229,6 +305,5 @@ def ingredient_analysis(
         "total_recipes": total,
         "probability_with_any": round(percentage_with_any, 2),
         "probability_breakdown": probability_breakdown,
-        "matched": matched_titles,
         "common_usage": common_usage
     }

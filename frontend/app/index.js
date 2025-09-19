@@ -36,17 +36,79 @@ export default function App() {
     // Track focus for custom allergen input
     const [inputFocused, setInputFocused] = useState(false);
     const inputRef = useRef(null);
+    // New state for analyzed menu items
+    const [analyzedMenuItems, setAnalyzedMenuItems] = useState([]);
+    const [analysisLoading, setAnalysisLoading] = useState(false);
+    const [analysisProgress, setAnalysisProgress] = useState(0);
 
-    useEffect(() => {
-        const loadAllergens = async () => {
-            const saved = await AsyncStorage.getItem('allergens');
-            if (saved) setSelectedAllergens(JSON.parse(saved));
-            const custom = await AsyncStorage.getItem('customAllergens');
-            if (custom) setCustomAllergens(JSON.parse(custom));
-        };
-        loadAllergens();
-    }, []);
+    // Efficiently analyze menu items with backend after extraction
+    const analyzeAllMenuItems = async (menuItems, userAllergens) => {
+        try {
+            console.log(`Starting analysis for ${menuItems.length} menu items...`);
+            setAnalysisLoading(true);
+            setAnalysisProgress(0);
+            
+            const apiUrl = 'http://10.0.0.49:8000/api/ingredient_analysis';
+            
+            // Process requests sequentially to avoid overwhelming the server
+            const results = [];
+            for (let i = 0; i < menuItems.length; i++) {
+                const item = menuItems[i];
+                const url = `${apiUrl}?dish=${encodeURIComponent(item.dish_name)}` +
+                    item.main_ingredients.map(ing => `&main_ingredients=${encodeURIComponent(ing)}`).join('') +
+                    userAllergens.map(allergen => `&user_allergens=${encodeURIComponent(allergen)}`).join('');
+                
+                console.log(`Processing item ${i + 1}/${menuItems.length}: ${item.dish_name}`);
+                setAnalysisProgress((i / menuItems.length) * 100);
+                
+                try {
+                    const response = await Promise.race([
+                        fetch(url),
+                        new Promise((_, reject) => 
+                            setTimeout(() => reject(new Error(`Request timed out after 15 seconds`)), 15000)
+                        )
+                    ]);
+                    
+                    if (!response.ok) {
+                        throw new Error(`HTTP error! status: ${response.status}`);
+                    }
+                    
+                    const contentType = response.headers.get('content-type');
+                    if (!contentType || !contentType.includes('application/json')) {
+                        const text = await response.text();
+                        throw new Error(`Expected JSON response, got: ${contentType}. Response: ${text}`);
+                    }
+                    
+                    const result = await response.json();
+                    results.push(result);
+                    console.log(`✓ Completed ${i + 1}/${menuItems.length}: ${item.dish_name}`);
+                } catch (error) {
+                    console.error(`✗ Failed ${i + 1}/${menuItems.length}: ${item.dish_name}`, error);
+                    // Add a fallback result to maintain array order
+                    results.push({
+                        dish: item.dish_name,
+                        error: error.message,
+                        probability_with_any: 0,
+                        probability_breakdown: {},
+                        common_usage: {}
+                    });
+                }
+            }
+            
+            setAnalysisProgress(100);
+            console.log(`Analysis completed. ${results.length} results:`, results);
+            setAnalyzedMenuItems(results);
+        } catch (err) {
+            setAnalyzedMenuItems([]);
+            console.error('Error analyzing menu items:', err);
+            Alert.alert('Analysis Error', `Could not analyze menu items: ${err.message}`);
+        } finally {
+            setAnalysisLoading(false);
+            setAnalysisProgress(0);
+        }
+    };
 
+    // Save allergens and custom allergens, then go to main screen
     const saveAllergens = async () => {
         await AsyncStorage.setItem('allergens', JSON.stringify(selectedAllergens));
         await AsyncStorage.setItem('customAllergens', JSON.stringify(customAllergens));
@@ -222,9 +284,8 @@ export default function App() {
         }
     }
 
-    // Main page: take image, loading, and show output
     // Gemini OCR extraction
-    const extractTextWithGemini = async (imageUri) => {
+    const extractTextWithGemini = async (imageUri, userAllergens) => {
         try {
             setMenuItems([]);
             // Read image as base64 using expo-file-system
@@ -239,6 +300,12 @@ export default function App() {
             // Call Gemini helper
             const items = await extractMenuItemsFromImage(base64);
             setMenuItems(items);
+            console.log('analysis begins');
+            if (items && items.length > 0) {
+                console.log(items);
+                await analyzeAllMenuItems(items, userAllergens);
+            }
+            console.log('analysis ends');
             // try {
             //     console.log('Extracted menu items (JSON):', JSON.stringify(items, null, 2));
             // } catch (e) {
@@ -288,31 +355,100 @@ export default function App() {
                 // Use original if resize fails
             }
             setImage(photoUri);
-            await extractTextWithGemini(photoUri);
+            console.log('extracting text');
+            const savedAllergens = await AsyncStorage.getItem('allergens');
+            const userAllergens = savedAllergens ? JSON.parse(savedAllergens) : [];
+            extractTextWithGemini(photoUri, userAllergens);
+            console.log('extraction done');
+            
         } else {
             setLoading(false);
         }
     };
-    return (
-        <View style={styles.centeredContainer}>
-            {loading && <ActivityIndicator size="large" color={Colors.light.buttonBg} style={{ marginTop: 20 }} />}
-            {image && !loading && (
-                <Image source={{ uri: image }} style={styles.imagePreview} />
-            )}
-            <TouchableOpacity
-                style={[image ? styles.retakeButton : styles.cameraButton, { backgroundColor: Colors.dark.buttonBg, justifyContent: 'center', alignItems: 'center', display: 'flex' }]}
-                onPress={takePhoto}
-                disabled={loading}
-            >
-                <Text style={[image ? styles.retakeButtonText : styles.cameraButtonText, { color: Colors.dark.buttonText, textAlign: 'center', width: '100%' }]}> 
-                    {loading ? 'Loading...' : image ? 'Retake' : 'Take Image'}
-                </Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.editIcon} onPress={() => setScreen('allergenSelect')}>
-                <Text style={styles.editIconText}>⚙️</Text>
-            </TouchableOpacity>
-        </View>
-    );
+    // Main screen rendering
+    if (screen === 'main') {
+        // Helper to get analysis for a dish
+        const getAnalysisForDish = (dishName) => {
+            return analyzedMenuItems.find(item => item.dish === dishName);
+        };
+        // Helper for color coding
+        const getDangerColor = (prob) => {
+            if (prob >= 0.7) return '#e57373'; // high danger
+            if (prob >= 0.3) return '#fff176'; // medium
+            return '#81c784'; // low
+        };
+        return (
+            <ScrollView style={{ flex: 1, width: '100%' }} contentContainerStyle={{ paddingBottom: 40, paddingTop: 148 }}>
+                {loading && <ActivityIndicator size="large" color={Colors.light.buttonBg} style={{ marginTop: 20 }} />}
+                {image && !loading && (
+                    <Image source={{ uri: image }} style={[styles.imagePreview, { alignSelf: 'center' }]} />
+                )}
+                <TouchableOpacity
+                    style={[image ? styles.retakeButton : styles.cameraButton, { backgroundColor: Colors.dark.buttonBg, justifyContent: 'center', alignItems: 'center', display: 'flex' }]}
+                    onPress={takePhoto}
+                    disabled={loading}
+                >
+                    <Text style={[image ? styles.retakeButtonText : styles.cameraButtonText, { color: Colors.dark.buttonText, textAlign: 'center', width: '100%' }]}> 
+                        {loading ? 'Loading...' : image ? 'Retake' : 'Take Image'}
+                    </Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.editIcon} onPress={() => setScreen('allergenSelect')}>
+                    <Text style={styles.editIconText}>⚙️</Text>
+                </TouchableOpacity>
+                
+                {/* Analysis progress indicator */}
+                {analysisLoading && (
+                    <View style={{ alignItems: 'center', marginVertical: 20 }}>
+                        <Text style={{ color: Colors.light.subBubbleText, marginBottom: 10 }}>
+                            Analyzing menu items... {Math.round(analysisProgress)}%
+                        </Text>
+                        <View style={{ width: '80%', height: 4, backgroundColor: '#e0e0e0', borderRadius: 2 }}>
+                            <View style={{ 
+                                width: `${analysisProgress}%`, 
+                                height: '100%', 
+                                backgroundColor: Colors.light.buttonBg, 
+                                borderRadius: 2 
+                            }} />
+                        </View>
+                    </View>
+                )}
+                
+                {/* Dish cards */}
+                <View style={styles.menuList}>
+                    {menuItems.map((dish, idx) => {
+                        // dish: { dish_name, main_ingredients, other }
+                        const analysis = getAnalysisForDish(dish.dish_name);
+                        const dangerColor = analysis ? getDangerColor(analysis.probability_with_any) : '#fff';
+                        return (
+                            <View key={dish.dish_name + idx} style={[styles.menuItem, { backgroundColor: dangerColor, borderWidth: analysis ? 2 : 1, borderColor: analysis ? '#6d3c7d' : '#A89F91' }]}> 
+                                <Text style={styles.dishName}>{dish.dish_name}</Text>
+                                <Text style={styles.ingredients}>{dish.main_ingredients && dish.main_ingredients.length > 0 ? dish.main_ingredients.join(', ') : 'No ingredients listed.'}</Text>
+                                {/* Analysis section */}
+                                {analysis && (
+                                    <View style={{ marginTop: 10, backgroundColor: '#f5f3ef', borderRadius: 8, padding: 8 }}>
+                                        <Text style={{ fontWeight: 'bold', color: '#6d3c7d', marginBottom: 4 }}>Allergen Probability Breakdown:</Text>
+                                        {analysis.probability_breakdown && Object.entries(analysis.probability_breakdown).map(([allergen, prob]) => {
+                                            // Get central usage from common_usage
+                                            let centralUsage = null;
+                                            if (analysis.common_usage && analysis.common_usage[allergen]) {
+                                                centralUsage = analysis.common_usage[allergen].usage;
+                                            }
+                                            return (
+                                                <Text key={allergen} style={{ color: prob >= 0.7 ? '#e57373' : prob >= 0.3 ? '#fff176' : '#81c784', fontWeight: prob >= 0.7 ? 'bold' : 'normal', marginBottom: 2 }}>
+                                                    {allergen}: {(prob).toFixed(1)}%{centralUsage ? `, usage: ${centralUsage}` : ''}
+                                                </Text>
+                                            );
+                                        })}
+                                    </View>
+                                )}
+                            </View>
+                        );
+                    })}
+                </View>
+            </ScrollView>
+        );
+    }
+    // ...existing code...
 }
 
 const styles = StyleSheet.create({
