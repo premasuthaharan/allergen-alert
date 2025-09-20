@@ -1,13 +1,12 @@
 from rapidfuzz import fuzz
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Body
 from db import recipes_collection
 from models import Recipe
-from typing import List
+from typing import List, Dict, Any
 from collections import Counter
+from ingredient_mappings import normalize_ingredient, get_allergen_matches, ALLERGEN_CATEGORIES
 
 router = APIRouter()
-
-NORMAL = {'tomatoes': ['marinara', 'tomato', 'tomato sauce', 'tomato paste', 'ketchup']}
 
 @router.get("/search", response_model=List[Recipe])
 def search(dish: str = Query(..., description="Dish name to search for"), user_allergens: List[str] = Query([])):
@@ -171,63 +170,16 @@ def match(
 def ingredient_analysis(
     dish: str = Query(..., description="Dish name to check"),
     user_allergens: List[str] = Query([]),
-    main_ingredients: List[str] = Query([])
+    main_ingredients: List[str] = Query([]),
+    normalized_ingredients: List[str] = Query([], description="Normalized ingredients from Gemini")
 ):
     import time
     start_time = time.time()
     
-    # Instead of loading ALL dishes, use MongoDB's text search and regex for better performance
-    # First try exact and partial matches
-    search_patterns = [
-        {"title": {"$regex": f"\\b{dish}\\b", "$options": "i"}},  # Word boundary match
-        {"title": {"$regex": dish, "$options": "i"}},  # General match
-    ]
+    result = analyze_single_dish(dish, user_allergens, main_ingredients, normalized_ingredients)
     
-    matched_dishes = []
-    threshold = 70
-    
-    # Try each search pattern until we get enough results or exhaust options
-    for pattern in search_patterns:
-        if len(matched_dishes) < 50:  # Limit to reasonable number for performance
-            cursor = recipes_collection.find(
-                pattern, 
-                {"title": 1, "ingredients": 1, "ingredient_analysis": 1, "normalized_ingredients": 1}
-            ).limit(100)  # Limit database results
-            
-            for d in cursor:
-                title = d.get("title", "")
-                if not isinstance(title, str) or not title.strip():
-                    continue
-                score = fuzz.ratio(dish.lower(), title.lower())
-                if score >= threshold:
-                    matched_dishes.append(d)
-            
-            if len(matched_dishes) >= 20:  # Stop if we have enough good matches
-                break
-    
-    # If still no good matches, lower the threshold and try broader search
-    if len(matched_dishes) < 5:
-        threshold = 50
-        cursor = recipes_collection.find(
-            {"title": {"$regex": dish, "$options": "i"}}, 
-            {"title": 1, "ingredients": 1, "ingredient_analysis": 1, "normalized_ingredients": 1}
-        ).limit(200)
-        
-        for d in cursor:
-            title = d.get("title", "")
-            if not isinstance(title, str) or not title.strip():
-                continue
-            score = fuzz.ratio(dish.lower(), title.lower())
-            if score >= threshold:
-                matched_dishes.append(d)
-
-    print(f"Database query took {time.time() - start_time:.3f}s, found {len(matched_dishes)} matches for '{dish}'")
-
-    total = len(matched_dishes)
-    with_any_allergen = 0
-    allergen_counts = {a.lower(): 0 for a in user_allergens}
-    usage_dict = {a.lower(): [] for a in user_allergens}
-    matched_titles = []
+    print(f"Single dish analysis took {time.time() - start_time:.3f}s for '{dish}'")
+    return result
     for d in matched_dishes:
         matched_titles.append(d.get("title", ""))
         analysis = d.get("ingredient_analysis", {})
@@ -307,3 +259,225 @@ def ingredient_analysis(
         "probability_breakdown": probability_breakdown,
         "common_usage": common_usage
     }
+
+@router.post("/batch_ingredient_analysis")
+def batch_ingredient_analysis(
+    request_data: Dict[str, Any] = Body(...)
+):
+    """
+    Analyze multiple dishes in a single request for better performance.
+    Expected format:
+    {
+        "dishes": [
+            {
+                "dish_name": "pasta", 
+                "main_ingredients": ["cheese", "tomato"],
+                "normalized_ingredients": ["tomatoes", "mozzarella cheese", "wheat flour"]
+            },
+            {
+                "dish_name": "pizza", 
+                "main_ingredients": ["cheese"],
+                "normalized_ingredients": ["mozzarella cheese", "wheat flour", "tomatoes"]
+            }
+        ],
+        "user_allergens": ["dairy", "nuts"]
+    }
+    """
+    import time
+    start_time = time.time()
+    
+    dishes = request_data.get("dishes", [])
+    user_allergens = request_data.get("user_allergens", [])
+    
+    if not dishes:
+        return {"error": "No dishes provided"}
+    
+    print(f"Processing batch request for {len(dishes)} dishes with allergens: {user_allergens}")
+    
+    results = []
+    
+    for dish_data in dishes:
+        dish_name = dish_data.get("dish_name", "")
+        main_ingredients = dish_data.get("main_ingredients", [])
+        normalized_ingredients = dish_data.get("normalized_ingredients", [])
+        
+        if not dish_name:
+            results.append({
+                "dish": "",
+                "error": "Dish name is required",
+                "probability_with_any": 0,
+                "probability_breakdown": {},
+                "common_usage": {}
+            })
+            continue
+        
+        try:
+            # Reuse the existing logic from ingredient_analysis
+            result = analyze_single_dish(dish_name, user_allergens, main_ingredients, normalized_ingredients)
+            results.append(result)
+        except Exception as e:
+            print(f"Error analyzing {dish_name}: {e}")
+            results.append({
+                "dish": dish_name,
+                "error": str(e),
+                "probability_with_any": 0,
+                "probability_breakdown": {},
+                "common_usage": {}
+            })
+    
+    end_time = time.time()
+    print(f"Batch analysis completed in {end_time - start_time:.3f}s for {len(dishes)} dishes")
+    
+    return {
+        "results": results,
+        "total_dishes": len(dishes),
+        "processing_time": round(end_time - start_time, 3)
+    }
+
+def analyze_single_dish(dish: str, user_allergens: List[str], main_ingredients: List[str] = [], normalized_ingredients: List[str] = []):
+    """Enhanced analysis logic with ingredient normalization and mapping"""
+    
+    # Step 1: Get all relevant ingredients for analysis
+    all_ingredients = []
+    
+    # Add main ingredients from Gemini
+    all_ingredients.extend(main_ingredients)
+    
+    # Add normalized ingredients from Gemini if available
+    if normalized_ingredients:
+        all_ingredients.extend(normalized_ingredients)
+        print(f"Using Gemini normalized ingredients: {normalized_ingredients}")
+    
+    # Step 2: Further normalize using our mapping system
+    additional_normalized = []
+    for ingredient in main_ingredients:
+        mapped = normalize_ingredient(ingredient)
+        additional_normalized.extend(mapped)
+    
+    all_ingredients.extend(additional_normalized)
+    
+    # Remove duplicates while preserving order
+    unique_ingredients = []
+    seen = set()
+    for ingredient in all_ingredients:
+        ingredient_lower = ingredient.lower()
+        if ingredient_lower not in seen:
+            unique_ingredients.append(ingredient_lower)
+            seen.add(ingredient_lower)
+    
+    print(f"All ingredients for analysis: {unique_ingredients}")
+    
+    # Step 3: Enhanced allergen detection using our mapping system
+    allergen_matches, all_normalized = get_allergen_matches(unique_ingredients, user_allergens)
+    
+    # Step 4: Calculate probabilities based on enhanced detection
+    probability_breakdown = {}
+    common_usage = {}
+    
+    for user_allergen in user_allergens:
+        allergen_lower = user_allergen.lower()
+        matches = allergen_matches.get(user_allergen, [])
+        
+        # Check if allergen is directly in ingredients or normalized ingredients
+        direct_match = False
+        
+        # Check direct ingredient matches
+        for ingredient in unique_ingredients:
+            if (allergen_lower in ingredient or 
+                ingredient in allergen_lower or
+                any(allergen_lower in cat_ingredient or cat_ingredient in allergen_lower 
+                    for cat_ingredient in ALLERGEN_CATEGORIES.get(allergen_lower, []))):
+                direct_match = True
+                break
+        
+        # Check if we found matches through our mapping system
+        mapping_match = len(matches) > 0
+        
+        # Calculate probability
+        if direct_match or mapping_match:
+            # If ingredient is explicitly listed, high probability
+            if any(allergen_lower == ing.lower() for ing in main_ingredients + normalized_ingredients):
+                probability = 100.0
+                usage = "central"
+            # If found through normalization (like marinara -> tomatoes), high probability  
+            elif mapping_match:
+                probability = 90.0
+                usage = "central"
+            # If found through category matching, medium probability
+            else:
+                probability = 75.0
+                usage = "likely"
+        else:
+            # Fall back to database analysis for dishes we have data on
+            probability, usage = get_database_probability(dish, user_allergen)
+        
+        probability_breakdown[allergen_lower] = probability
+        common_usage[allergen_lower] = {
+            "usage": usage,
+            "count": 1 if probability > 0 else 0,
+            "matches": matches if mapping_match else []
+        }
+    
+    # Calculate overall probability
+    max_probability = max(probability_breakdown.values()) if probability_breakdown.values() else 0.0
+    
+    return {
+        "dish": dish,
+        "main_ingredients": main_ingredients,
+        "normalized_ingredients": normalized_ingredients,
+        "analyzed_ingredients": unique_ingredients,
+        "total_recipes": 1,  # Simplified since we're using enhanced detection
+        "probability_with_any": max_probability,
+        "probability_breakdown": probability_breakdown,
+        "common_usage": common_usage,
+        "allergen_matches": allergen_matches
+    }
+
+def get_database_probability(dish: str, user_allergen: str):
+    """Fallback to database analysis for dishes we have recipe data on"""
+    try:
+        # Quick database lookup for this specific dish and allergen
+        search_patterns = [
+            {"title": {"$regex": f"\\b{dish}\\b", "$options": "i"}},
+            {"title": {"$regex": dish, "$options": "i"}},
+        ]
+        
+        matched_dishes = []
+        for pattern in search_patterns:
+            cursor = recipes_collection.find(
+                pattern, 
+                {"title": 1, "ingredients": 1}
+            ).limit(20)
+            
+            for d in cursor:
+                title = d.get("title", "")
+                if not isinstance(title, str):
+                    continue
+                score = fuzz.ratio(dish.lower(), title.lower())
+                if score >= 70:
+                    matched_dishes.append(d)
+            
+            if len(matched_dishes) >= 10:
+                break
+        
+        if not matched_dishes:
+            return 0.0, None
+        
+        # Count allergen occurrences
+        allergen_count = 0
+        total_count = len(matched_dishes)
+        
+        for d in matched_dishes:
+            ingredients = d.get("ingredients", [])
+            ingredients_text = " ".join(ingredients).lower()
+            if user_allergen.lower() in ingredients_text:
+                allergen_count += 1
+        
+        probability = (allergen_count / total_count * 100) if total_count > 0 else 0.0
+        usage = "central" if probability > 50 else "possible" if probability > 0 else None
+        
+        return probability, usage
+        
+    except Exception as e:
+        print(f"Database lookup failed for {dish}/{user_allergen}: {e}")
+        return 0.0, None

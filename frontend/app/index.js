@@ -16,7 +16,9 @@ import * as ImageManipulator from 'expo-image-manipulator';
 
 import Constants from 'expo-constants';
 import { extractMenuItemsFromImage } from '../helpers/geminiOCR';
+import { analyzeAllMenuItemsBatch } from '../helpers/batchAnalysis';
 import * as FileSystem from 'expo-file-system';
+import { config } from '../config/config';
 const apiKey = Constants.expoConfig?.extra?.apiNinjasKey;
 
 export default function App() {
@@ -43,69 +45,14 @@ export default function App() {
 
     // Efficiently analyze menu items with backend after extraction
     const analyzeAllMenuItems = async (menuItems, userAllergens) => {
-        try {
-            console.log(`Starting analysis for ${menuItems.length} menu items...`);
-            setAnalysisLoading(true);
-            setAnalysisProgress(0);
-            
-            const apiUrl = 'http://10.0.0.49:8000/api/ingredient_analysis';
-            
-            // Process requests sequentially to avoid overwhelming the server
-            const results = [];
-            for (let i = 0; i < menuItems.length; i++) {
-                const item = menuItems[i];
-                const url = `${apiUrl}?dish=${encodeURIComponent(item.dish_name)}` +
-                    item.main_ingredients.map(ing => `&main_ingredients=${encodeURIComponent(ing)}`).join('') +
-                    userAllergens.map(allergen => `&user_allergens=${encodeURIComponent(allergen)}`).join('');
-                
-                console.log(`Processing item ${i + 1}/${menuItems.length}: ${item.dish_name}`);
-                setAnalysisProgress((i / menuItems.length) * 100);
-                
-                try {
-                    const response = await Promise.race([
-                        fetch(url),
-                        new Promise((_, reject) => 
-                            setTimeout(() => reject(new Error(`Request timed out after 15 seconds`)), 15000)
-                        )
-                    ]);
-                    
-                    if (!response.ok) {
-                        throw new Error(`HTTP error! status: ${response.status}`);
-                    }
-                    
-                    const contentType = response.headers.get('content-type');
-                    if (!contentType || !contentType.includes('application/json')) {
-                        const text = await response.text();
-                        throw new Error(`Expected JSON response, got: ${contentType}. Response: ${text}`);
-                    }
-                    
-                    const result = await response.json();
-                    results.push(result);
-                    console.log(`✓ Completed ${i + 1}/${menuItems.length}: ${item.dish_name}`);
-                } catch (error) {
-                    console.error(`✗ Failed ${i + 1}/${menuItems.length}: ${item.dish_name}`, error);
-                    // Add a fallback result to maintain array order
-                    results.push({
-                        dish: item.dish_name,
-                        error: error.message,
-                        probability_with_any: 0,
-                        probability_breakdown: {},
-                        common_usage: {}
-                    });
-                }
-            }
-            
-            setAnalysisProgress(100);
-            console.log(`Analysis completed. ${results.length} results:`, results);
-            setAnalyzedMenuItems(results);
-        } catch (err) {
-            setAnalyzedMenuItems([]);
-            console.error('Error analyzing menu items:', err);
-            Alert.alert('Analysis Error', `Could not analyze menu items: ${err.message}`);
-        } finally {
-            setAnalysisLoading(false);
-            setAnalysisProgress(0);
-        }
+        await analyzeAllMenuItemsBatch(
+            menuItems, 
+            userAllergens, 
+            setAnalysisLoading, 
+            setAnalysisProgress,
+            setAnalyzedMenuItems,
+            Alert
+        );
     };
 
     // Save allergens and custom allergens, then go to main screen
@@ -345,12 +292,46 @@ export default function App() {
         if (!result.canceled && result.assets && result.assets.length > 0) {
             let photoUri = result.assets[0].uri;
             try {
-                let manipResult = await ImageManipulator.manipulateAsync(
+                setImage(photoUri);
+            console.log('📸 Image captured, optimizing...');
+            
+            // More aggressive image optimization
+            try {
+                // First pass: basic resize and compression
+                let optimizedResult = await ImageManipulator.manipulateAsync(
                     photoUri,
-                    [{ resize: { width: 800 } }],
-                    { compress: 0.3, format: ImageManipulator.SaveFormat.JPEG }
+                    [{ resize: { width: config.MAX_IMAGE_WIDTH } }],
+                    { 
+                        compress: config.IMAGE_COMPRESSION, 
+                        format: ImageManipulator.SaveFormat.JPEG 
+                    }
                 );
-                photoUri = manipResult.uri;
+                
+                // Check file size and compress further if needed
+                const optimizedSize = await FileSystem.getInfoAsync(optimizedResult.uri);
+                console.log(`📊 Image optimized: ${(optimizedSize.size / 1024).toFixed(1)}KB`);
+                
+                // If still too large (>500KB), compress more aggressively
+                if (optimizedSize.size > 500 * 1024) {
+                    console.log('🔧 Image still large, applying additional compression...');
+                    optimizedResult = await ImageManipulator.manipulateAsync(
+                        optimizedResult.uri,
+                        [{ resize: { width: 600 } }],
+                        { 
+                            compress: 0.1, 
+                            format: ImageManipulator.SaveFormat.JPEG 
+                        }
+                    );
+                    
+                    const finalSize = await FileSystem.getInfoAsync(optimizedResult.uri);
+                    console.log(`✅ Final image size: ${(finalSize.size / 1024).toFixed(1)}KB`);
+                }
+                
+                photoUri = optimizedResult.uri;
+            } catch (optimizationError) {
+                console.warn('⚠️ Image optimization failed, using original:', optimizationError);
+                // Continue with original image if optimization fails
+            }
             } catch (e) {
                 // Use original if resize fails
             }
@@ -402,12 +383,13 @@ export default function App() {
                         <Text style={{ color: Colors.light.subBubbleText, marginBottom: 10 }}>
                             Analyzing menu items... {Math.round(analysisProgress)}%
                         </Text>
-                        <View style={{ width: '80%', height: 4, backgroundColor: '#e0e0e0', borderRadius: 2 }}>
+                        <View style={{ width: '80%', height: 6, backgroundColor: '#e0e0e0', borderRadius: 3 }}>
                             <View style={{ 
                                 width: `${analysisProgress}%`, 
                                 height: '100%', 
                                 backgroundColor: Colors.light.buttonBg, 
-                                borderRadius: 2 
+                                borderRadius: 3,
+                                transition: 'width 0.3s ease'
                             }} />
                         </View>
                     </View>
