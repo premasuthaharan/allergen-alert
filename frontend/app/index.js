@@ -291,51 +291,49 @@ export default function App() {
         }
         if (!result.canceled && result.assets && result.assets.length > 0) {
             let photoUri = result.assets[0].uri;
-            try {
-                setImage(photoUri);
             console.log('📸 Image captured, optimizing...');
-            
+
             // More aggressive image optimization
             try {
                 // First pass: basic resize and compression
                 let optimizedResult = await ImageManipulator.manipulateAsync(
                     photoUri,
                     [{ resize: { width: config.MAX_IMAGE_WIDTH } }],
-                    { 
-                        compress: config.IMAGE_COMPRESSION, 
-                        format: ImageManipulator.SaveFormat.JPEG 
+                    {
+                        compress: config.IMAGE_COMPRESSION,
+                        format: ImageManipulator.SaveFormat.JPEG
                     }
                 );
-                
+
                 // Check file size and compress further if needed
                 const optimizedSize = await FileSystem.getInfoAsync(optimizedResult.uri);
                 console.log(`📊 Image optimized: ${(optimizedSize.size / 1024).toFixed(1)}KB`);
-                
+
                 // If still too large (>500KB), compress more aggressively
                 if (optimizedSize.size > 500 * 1024) {
                     console.log('🔧 Image still large, applying additional compression...');
                     optimizedResult = await ImageManipulator.manipulateAsync(
                         optimizedResult.uri,
                         [{ resize: { width: 600 } }],
-                        { 
-                            compress: 0.1, 
-                            format: ImageManipulator.SaveFormat.JPEG 
+                        {
+                            compress: 0.1,
+                            format: ImageManipulator.SaveFormat.JPEG
                         }
                     );
-                    
+
                     const finalSize = await FileSystem.getInfoAsync(optimizedResult.uri);
                     console.log(`✅ Final image size: ${(finalSize.size / 1024).toFixed(1)}KB`);
                 }
-                
+
                 photoUri = optimizedResult.uri;
             } catch (optimizationError) {
                 console.warn('⚠️ Image optimization failed, using original:', optimizationError);
                 // Continue with original image if optimization fails
             }
-            } catch (e) {
-                // Use original if resize fails
-            }
+
+            // Set the image URI (either optimized or original)
             setImage(photoUri);
+            console.log('📷 Image URI set:', photoUri);
             console.log('extracting text');
             const savedAllergens = await AsyncStorage.getItem('allergens');
             const userAllergens = savedAllergens ? JSON.parse(savedAllergens) : [];
@@ -352,31 +350,68 @@ export default function App() {
         const getAnalysisForDish = (dishName) => {
             return analyzedMenuItems.find(item => item.dish === dishName);
         };
-        // Helper for color coding
-        const getDangerColor = (prob) => {
-            if (prob >= 0.7) return '#e57373'; // high danger
-            if (prob >= 0.3) return '#fff176'; // medium
-            return '#81c784'; // low
+
+        // Helper to check if most/all allergens are "possible"
+        const isMostlyPossible = (analysis) => {
+            if (!analysis || !analysis.common_usage) return false;
+            const usages = Object.values(analysis.common_usage).map(u => u.usage);
+            const possibleCount = usages.filter(u => u === 'possible').length;
+            return possibleCount > 0 && possibleCount >= usages.length * 0.6; // 60% or more are "possible"
         };
+
+        // Helper for color coding
+        const getDangerColor = (analysis) => {
+            if (!analysis) return '#fff';
+            const prob = analysis.probability_with_any;
+
+            // Check if mostly "possible" allergens - use orange
+            if (isMostlyPossible(analysis)) {
+                return '#FFB74D'; // Orange shade for uncertain allergens
+            }
+
+            // Standard probability-based colors
+            if (prob >= 0.7) return '#e57373'; // high danger - red
+            if (prob >= 0.3) return '#fff176'; // medium - yellow
+            return '#81c784'; // low - green
+        };
+
+        // Sort menu items: safest first (lowest probability), most dangerous last
+        const sortedMenuItems = [...menuItems].sort((a, b) => {
+            const analysisA = getAnalysisForDish(a.dish_name);
+            const analysisB = getAnalysisForDish(b.dish_name);
+
+            // Items without analysis go to the end
+            if (!analysisA && !analysisB) return 0;
+            if (!analysisA) return 1;
+            if (!analysisB) return -1;
+
+            // Sort by probability (ascending - safest first)
+            return analysisA.probability_with_any - analysisB.probability_with_any;
+        });
+
         return (
             <ScrollView style={{ flex: 1, width: '100%' }} contentContainerStyle={{ paddingBottom: 40, paddingTop: 148 }}>
-                {loading && <ActivityIndicator size="large" color={Colors.light.buttonBg} style={{ marginTop: 20 }} />}
-                {image && !loading && (
-                    <Image source={{ uri: image }} style={[styles.imagePreview, { alignSelf: 'center' }]} />
+                {loading && !analysisLoading && <ActivityIndicator size="large" color={Colors.light.buttonBg} style={{ marginTop: 20 }} />}
+                {image && (!loading || analysisLoading) && (
+                    <Image
+                        source={{ uri: image }}
+                        style={[styles.imagePreview, { alignSelf: 'center' }]}
+                        resizeMode="cover"
+                    />
                 )}
                 <TouchableOpacity
                     style={[image ? styles.retakeButton : styles.cameraButton, { backgroundColor: Colors.dark.buttonBg, justifyContent: 'center', alignItems: 'center', display: 'flex' }]}
                     onPress={takePhoto}
-                    disabled={loading}
+                    disabled={loading || analysisLoading}
                 >
-                    <Text style={[image ? styles.retakeButtonText : styles.cameraButtonText, { color: Colors.dark.buttonText, textAlign: 'center', width: '100%' }]}> 
-                        {loading ? 'Loading...' : image ? 'Retake' : 'Take Image'}
+                    <Text style={[image ? styles.retakeButtonText : styles.cameraButtonText, { color: Colors.dark.buttonText, textAlign: 'center', width: '100%' }]}>
+                        {analysisLoading ? 'Analyzing...' : loading ? 'Loading...' : image ? 'Retake' : 'Take Image'}
                     </Text>
                 </TouchableOpacity>
                 <TouchableOpacity style={styles.editIcon} onPress={() => setScreen('allergenSelect')}>
                     <Text style={styles.editIconText}>⚙️</Text>
                 </TouchableOpacity>
-                
+
                 {/* Analysis progress indicator */}
                 {analysisLoading && (
                     <View style={{ alignItems: 'center', marginVertical: 20 }}>
@@ -384,23 +419,23 @@ export default function App() {
                             Analyzing menu items... {Math.round(analysisProgress)}%
                         </Text>
                         <View style={{ width: '80%', height: 6, backgroundColor: '#e0e0e0', borderRadius: 3 }}>
-                            <View style={{ 
-                                width: `${analysisProgress}%`, 
-                                height: '100%', 
-                                backgroundColor: Colors.light.buttonBg, 
+                            <View style={{
+                                width: `${analysisProgress}%`,
+                                height: '100%',
+                                backgroundColor: Colors.light.buttonBg,
                                 borderRadius: 3,
                                 transition: 'width 0.3s ease'
                             }} />
                         </View>
                     </View>
                 )}
-                
+
                 {/* Dish cards */}
                 <View style={styles.menuList}>
-                    {menuItems.map((dish, idx) => {
+                    {sortedMenuItems.map((dish, idx) => {
                         // dish: { dish_name, main_ingredients, other }
                         const analysis = getAnalysisForDish(dish.dish_name);
-                        const dangerColor = analysis ? getDangerColor(analysis.probability_with_any) : '#fff';
+                        const dangerColor = getDangerColor(analysis);
                         return (
                             <View key={dish.dish_name + idx} style={[styles.menuItem, { backgroundColor: dangerColor, borderWidth: analysis ? 2 : 1, borderColor: analysis ? '#6d3c7d' : '#A89F91' }]}> 
                                 <Text style={styles.dishName}>{dish.dish_name}</Text>
@@ -415,9 +450,16 @@ export default function App() {
                                             if (analysis.common_usage && analysis.common_usage[allergen]) {
                                                 centralUsage = analysis.common_usage[allergen].usage;
                                             }
+                                            // Format usage text with custom message for "possible"
+                                            let usageText = '';
+                                            if (centralUsage) {
+                                                usageText = centralUsage === 'possible'
+                                                    ? ', usage: possible (ask waiter for clarification)'
+                                                    : `, usage: ${centralUsage}`;
+                                            }
                                             return (
                                                 <Text key={allergen} style={{ color: prob >= 0.7 ? '#e57373' : prob >= 0.3 ? '#fff176' : '#81c784', fontWeight: prob >= 0.7 ? 'bold' : 'normal', marginBottom: 2 }}>
-                                                    {allergen}: {(prob).toFixed(1)}%{centralUsage ? `, usage: ${centralUsage}` : ''}
+                                                    {allergen}: {(prob).toFixed(1)}%{usageText}
                                                 </Text>
                                             );
                                         })}

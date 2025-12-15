@@ -7,7 +7,7 @@ export async function extractMenuItemsFromImage(base64ImageData) {
     if (!GEMINI_API_KEY || GEMINI_API_KEY === "YOUR_GOOGLE_GEMINI_API_KEY_HERE") {
         throw new Error("Please set your Gemini API key in app config.");
     }
-    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${GEMINI_API_KEY}`;
+    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
     const prompt = `
     You are an expert menu parsing service and food allergen analyst. Your task is to extract all food items from this image and format them into a structured JSON array with enhanced ingredient analysis.
     
