@@ -2,7 +2,7 @@ export const config = {
   // API Configuration
   API_BASE_URL: __DEV__ 
     ? 'http://10.0.0.49:8000'  // Development - your local IP
-    : 'https://your-production-api.com',  // Production URL when deployed
+    : 'https://allergen-alert-1.onrender.com',  // Production URL when deployed
   
   // Request Configuration
   REQUEST_TIMEOUT: 15000,  // 15 seconds

@@ -291,7 +291,29 @@ export default function App() {
         }
         if (!result.canceled && result.assets && result.assets.length > 0) {
             let photoUri = result.assets[0].uri;
-            console.log('📸 Image captured, optimizing...');
+            console.log('📸 Image captured:', photoUri);
+
+            // Fix for Android content:// URI - copy to cache directory first
+            if (photoUri.startsWith('content://')) {
+                try {
+                    console.log('📋 Converting content:// URI to file:// URI...');
+                    const filename = `photo_${Date.now()}.jpg`;
+                    const newUri = FileSystem.cacheDirectory + filename;
+                    await FileSystem.copyAsync({
+                        from: photoUri,
+                        to: newUri
+                    });
+                    photoUri = newUri;
+                    console.log('✅ Converted to:', photoUri);
+                } catch (copyError) {
+                    console.error('❌ Failed to copy image:', copyError);
+                    Alert.alert('Error', 'Failed to process image. Please try again.');
+                    setLoading(false);
+                    return;
+                }
+            }
+
+            console.log('🔧 Optimizing image...');
 
             // More aggressive image optimization
             try {
@@ -332,12 +354,16 @@ export default function App() {
             }
 
             // Set the image URI (either optimized or original)
-            setImage(photoUri);
             console.log('📷 Image URI set:', photoUri);
+            setImage(photoUri);
+
+            // Small delay to ensure image state is set before starting extraction
+            await new Promise(resolve => setTimeout(resolve, 100));
+
             console.log('extracting text');
             const savedAllergens = await AsyncStorage.getItem('allergens');
             const userAllergens = savedAllergens ? JSON.parse(savedAllergens) : [];
-            extractTextWithGemini(photoUri, userAllergens);
+            await extractTextWithGemini(photoUri, userAllergens);
             console.log('extraction done');
             
         } else {
@@ -362,17 +388,25 @@ export default function App() {
         // Helper for color coding
         const getDangerColor = (analysis) => {
             if (!analysis) return '#fff';
-            const prob = analysis.probability_with_any;
+
+            // Calculate max probability from actual allergen probabilities (ignore 0%)
+            let maxProb = 0;
+            if (analysis.probability_breakdown) {
+                const probs = Object.values(analysis.probability_breakdown);
+                maxProb = Math.max(...probs);
+            } else {
+                maxProb = analysis.probability_with_any || 0;
+            }
 
             // Check if mostly "possible" allergens - use orange
             if (isMostlyPossible(analysis)) {
                 return '#FFB74D'; // Orange shade for uncertain allergens
             }
 
-            // Standard probability-based colors
-            if (prob >= 0.7) return '#e57373'; // high danger - red
-            if (prob >= 0.3) return '#fff176'; // medium - yellow
-            return '#81c784'; // low - green
+            // Standard probability-based colors using max probability
+            if (maxProb >= 50) return '#e57373'; // high danger - red (>=50%)
+            if (maxProb >= 10) return '#fff176'; // medium - yellow (>=10%)
+            return '#81c784'; // low - green (<10%)
         };
 
         // Sort menu items: safest first (lowest probability), most dangerous last
